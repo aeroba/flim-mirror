@@ -76,7 +76,7 @@ jobs:
 
       - name: Copy S3 -> R2
         run: |
-          rclone copy --files-from /tmp/keys.txt \
+          rclone copy --files-from /tmp/keys.txt --no-traverse \
             --transfers 64 --checkers 64 \
             --retries 3 --low-level-retries 10 --timeout 5m \
             --stats 60s --stats-one-line \
