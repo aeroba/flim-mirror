@@ -1,0 +1,84 @@
+name: flim-mirror
+
+on:
+  workflow_dispatch:
+    inputs:
+      shards:
+        description: "shard selection: all | comma list, e.g. 0,1,2"
+        required: true
+        default: "all"
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        env:
+          IN: ${{ inputs.shards }}
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json, os
+          s = os.environ["IN"].strip()
+          shards = list(range(20)) if s == "all" else [int(x) for x in s.split(",")]
+          print("matrix=" + json.dumps({"shard": shards}))
+          EOF
+      - run: echo "shards=${{ steps.m.outputs.matrix }}"
+
+  copy:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    name: shard ${{ matrix.shard }}
+    steps:
+      - name: Install rclone
+        run: |
+          curl -fsSL -o /tmp/rclone.zip https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip -q /tmp/rclone.zip -d /tmp/rc
+          sudo install -m755 "$(find /tmp/rc -name rclone -type f | head -1)" /usr/local/bin/rclone
+          rclone version | head -1
+
+      - name: Fetch manifest shard
+        run: |
+          curl -fsSL -o /tmp/keys.txt "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/manifests/shard-$(printf %02d ${{ matrix.shard }}).txt"
+          wc -l /tmp/keys.txt
+
+      - name: Configure rclone
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_KEY: ${{ secrets.R2_KEY }}
+          R2_SECRET: ${{ secrets.R2_SECRET }}
+        run: |
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [src]
+          type = s3
+          provider = AWS
+          env_auth = false
+          region = eu-central-1
+          no_check_bucket = true
+          [dst]
+          type = s3
+          provider = Cloudflare
+          access_key_id = $R2_KEY
+          secret_access_key = $R2_SECRET
+          endpoint = $R2_ENDPOINT
+          region = auto
+          no_check_bucket = true
+          EOF
+
+      - name: Copy S3 -> R2
+        run: |
+          rclone copy --files-from /tmp/keys.txt \
+            --transfers 64 --checkers 64 \
+            --retries 3 --low-level-retries 10 --timeout 300 \
+            --stats 60s --stats-one-line \
+            src:flim-1-0-2 dst:flim-full
+          echo "shard ${{ matrix.shard }} done"
